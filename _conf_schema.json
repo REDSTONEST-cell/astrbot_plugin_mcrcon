@@ -1,0 +1,38 @@
+{
+  "rcon_host": {
+    "description": "MC 服务器 RCON 地址或域名",
+    "type": "string",
+    "default": "localhost",
+    "hint": "例如 127.0.0.1 或者 mc.example.com"
+  },
+  "rcon_port": {
+    "description": "RCON 端口号",
+    "type": "int",
+    "default": 25575
+  },
+  "rcon_password": {
+    "description": "RCON 密码",
+    "type": "string",
+    "default": ""
+  },
+  "whitelist_command": {
+    "description": "whitelist命令名",
+    "type": "string",
+    "default": "whitelist",
+    "hint": "原版为whitelist, 可改成swl等白名单插件"
+  },
+  "admin_qqs": {
+    "description": "允许使用敏感命令的 QQ 列表",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "enable_apply_whitelist": {
+    "description": "是否开启玩家自主申请白名单",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后玩家可用 /applywl 指令申请白名单，每个QQ只能绑定一个MC账号"
+  }
+}
