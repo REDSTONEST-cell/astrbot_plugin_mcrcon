@@ -33,6 +33,26 @@
     "description": "是否开启玩家自主申请白名单",
     "type": "bool",
     "default": false,
-    "hint": "开启后玩家可用 /applywl 指令申请白名单，每个QQ只能绑定一个MC账号"
+    "hint": "开启后玩家可用 /wantwl 指令申请白名单，每个QQ只能绑定一个MC账号"
+  },
+  "unbind_on_leave": {
+    "description": "退群自动解绑",
+    "type": "bool",
+    "default": true,
+    "hint": "QQ 退群或被踢后自动删除其绑定记录（仅 OneBot v11/aiocqhttp 适配器）"
+  },
+  "unbind_groups": {
+    "description": "监听退群的群号列表",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "hint": "留空则机器人所在的所有群都生效"
+  },
+  "unbind_remove_whitelist": {
+    "description": "解绑时同时移出白名单",
+    "type": "bool",
+    "default": true
   }
 }

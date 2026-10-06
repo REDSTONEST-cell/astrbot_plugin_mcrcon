@@ -3,7 +3,10 @@ import json
 import struct
 import os
 import re
+import time
+import aiosqlite
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event.filter import EventMessageType, PlatformAdapterType
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.star import StarTools
@@ -64,8 +67,72 @@ async def rcon_command(
         await rcon.close()
 
 
+class BindingStore:  # QQ 与 MC 账号绑定记录 (SQLite)
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+
+    async def init(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bindings (
+                    qq TEXT PRIMARY KEY,
+                    mcname TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    group_id TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            await db.commit()
+
+    async def get_by_qq(self, qq: str) -> str | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT mcname FROM bindings WHERE qq = ?", (qq,)
+            ) as cur:
+                row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def get_by_mcname(self, mcname: str) -> tuple[str, str, int] | None:
+        """返回 (qq, group_id, created_at)，MC 名不区分大小写"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT qq, group_id, created_at FROM bindings WHERE mcname = ?",
+                (mcname,),
+            ) as cur:
+                row = await cur.fetchone()
+        return tuple(row) if row else None
+
+    async def add(self, qq: str, mcname: str, group_id: str = "") -> bool:
+        """新增绑定，QQ 或 MC 名已存在时返回 False"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT INTO bindings (qq, mcname, group_id, created_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (qq, mcname, group_id, int(time.time())),
+                )
+                await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+    async def remove_by_qq(self, qq: str) -> str | None:
+        """删除绑定，返回被解绑的 MC 名"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT mcname FROM bindings WHERE qq = ?", (qq,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            await db.execute("DELETE FROM bindings WHERE qq = ?", (qq,))
+            await db.commit()
+        return row[0]
+
+
 @register(
-    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.1.0"
+    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.2.0"
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -78,22 +145,30 @@ class MyPlugin(Star):
         self.rcon_password = self.config.get("rcon_password")
         # 申请白名单功能
         self.enable_apply_whitelist = self.config.get("enable_apply_whitelist", False)
+        # 退群自动解绑
+        self.unbind_on_leave = self.config.get("unbind_on_leave", True)
+        self.unbind_groups = {str(g) for g in self.config.get("unbind_groups", [])}
+        self.unbind_remove_whitelist = self.config.get("unbind_remove_whitelist", True)
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_mcman")
         self.apply_file = os.path.join(self.plugin_data_dir, "apply_whitelist.json")
-        self.apply_data = self._load_apply_data()
-
-    def _load_apply_data(self):
-        if os.path.exists(self.apply_file):
-            with open(self.apply_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {}
-
-    def _save_apply_data(self):
-        with open(self.apply_file, "w", encoding="utf-8") as f:
-            json.dump(self.apply_data, f, ensure_ascii=False, indent=2)
+        self.store = BindingStore(os.path.join(self.plugin_data_dir, "bindings.db"))
 
     async def initialize(self):
+        await self.store.init()
+        await self._migrate_json()
         logger.info("mcman plugin by kdj")
+
+    async def _migrate_json(self):
+        """把旧版 apply_whitelist.json 中的绑定导入 SQLite，导入后重命名旧文件"""
+        if not os.path.exists(self.apply_file):
+            return
+        with open(self.apply_file, "r", encoding="utf-8") as f:
+            old_data = json.load(f)
+        for qq, mcname in old_data.items():
+            if not await self.store.add(str(qq), mcname):
+                logger.warning(f"迁移跳过冲突的绑定: {qq} -> {mcname}")
+        os.replace(self.apply_file, self.apply_file + ".migrated")
+        logger.info(f"已将 {len(old_data)} 条旧绑定记录迁移到 SQLite")
 
     def is_admin(self, qqid: str) -> bool:
         return qqid in self.admin_qqs
@@ -229,10 +304,12 @@ class MyPlugin(Star):
             return
 
         qqid = str(event.get_sender_id())
-        if qqid in self.apply_data:
-            yield event.plain_result(
-                f"你已经绑定过MC账号 `{self.apply_data[qqid]}`，不能重复申请。"
-            )
+        bound = await self.store.get_by_qq(qqid)
+        if bound:
+            yield event.plain_result(f"你已经绑定过MC账号 `{bound}`，不能重复申请。")
+            return
+        if await self.store.get_by_mcname(mcname):
+            yield event.plain_result(f"MC账号 `{mcname}` 已被其他QQ绑定。")
             return
 
         # 调用RCON执行
@@ -241,8 +318,11 @@ class MyPlugin(Star):
             resp = await rcon_command(
                 self.rcon_host, self.rcon_port, self.rcon_password, command
             )
-            self.apply_data[qqid] = mcname
-            self._save_apply_data()
+            if not await self.store.add(qqid, mcname, str(event.get_group_id() or "")):
+                yield event.plain_result(
+                    f"绑定失败：MC账号 `{mcname}` 或你的QQ已被绑定。"
+                )
+                return
             yield event.plain_result(
                 f"成功为你绑定MC账号 `{mcname}` 并加入白名单！\n服务器返回：{strip_mc_color(resp)}"
             )
@@ -266,6 +346,63 @@ class MyPlugin(Star):
         command = f"plugins".strip()
         async for msg in self.execute_and_reply(event, command, "插件列表"):
             yield msg
+
+    @filter.command("mcwho", desc="MC 玩家名反查绑定的QQ")
+    async def mcwho(self, event: AstrMessageEvent, mcname: str = ""):
+        if not self.is_admin(str(event.get_sender_id())):
+            yield event.plain_result("抱歉，你没有权限执行此操作。")
+            return
+        if not mcname:
+            yield event.plain_result("请输入要查询的MC用户名。")
+            return
+        row = await self.store.get_by_mcname(mcname)
+        if not row:
+            yield event.plain_result(f"MC账号 {mcname} 没有绑定任何QQ。")
+            return
+        qq, group_id, created_at = row
+        bound_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(created_at))
+        group_info = f"，申请群 {group_id}" if group_id else ""
+        yield event.plain_result(
+            f"MC账号 {mcname} 绑定的QQ：{qq}\n绑定时间：{bound_time}{group_info}"
+        )
+
+    @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
+    async def on_group_decrease(self, event: AstrMessageEvent):
+        """监听 OneBot 群成员减少通知，退群/被踢时自动解绑"""
+        raw = event.message_obj.raw_message
+        if (
+            not self.unbind_on_leave
+            or not isinstance(raw, dict)
+            or raw.get("post_type") != "notice"
+            or raw.get("notice_type") != "group_decrease"
+            or raw.get("sub_type") == "kick_me"  # 机器人自己被踢
+        ):
+            return
+        group_id = str(raw.get("group_id", ""))
+        if self.unbind_groups and group_id not in self.unbind_groups:
+            return
+
+        qqid = str(raw.get("user_id", ""))
+        mcname = await self.store.remove_by_qq(qqid)
+        if not mcname:
+            return
+        logger.info(f"QQ {qqid} 退出群 {group_id}，已解绑 MC 账号 {mcname}")
+
+        msg = f"QQ {qqid} 已退群，已自动解绑MC账号 {mcname}"
+        if self.unbind_remove_whitelist:
+            try:
+                await rcon_command(
+                    self.rcon_host,
+                    self.rcon_port,
+                    self.rcon_password,
+                    f"{self.whitelist_command} remove {mcname}",
+                )
+                msg += " 并移出白名单"
+            except Exception as e:
+                logger.error(f"退群移出白名单失败: {e}")
+                msg += f"，但移出白名单失败：{e}"
+        yield event.plain_result(msg)
 
     async def terminate(self):
         logger.info("mcman plugin stopped")
