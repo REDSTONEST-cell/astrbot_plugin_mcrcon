@@ -18,7 +18,7 @@
 
 /wantwl {mcname} 玩家自助申请白名单并绑定 QQ（需在配置中开启）
 
-/mcwho {mcname} 反查 MC 账号绑定的 QQ（管理员）
+/mcwho {MC名 | QQ号 | @某人} 查询绑定关系：用 MC 名查 QQ，或用 QQ 号 / 群里 @ 某人查 MC 名（管理员）
 
 ### 绑定数据
 

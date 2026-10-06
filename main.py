@@ -11,6 +11,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.star import StarTools
 from astrbot.api import AstrBotConfig  # 配置管理
+import astrbot.api.message_components as Comp
 
 
 class AsyncRcon:  # 异步RCON类
@@ -93,11 +94,21 @@ class BindingStore:  # QQ 与 MC 账号绑定记录 (SQLite)
                 row = await cur.fetchone()
         return row[0] if row else None
 
-    async def get_by_mcname(self, mcname: str) -> tuple[str, str, int] | None:
-        """返回 (qq, group_id, created_at)，MC 名不区分大小写"""
+    async def get_detail_by_qq(self, qq: str) -> tuple[str, str, int] | None:
+        """返回 (mcname, group_id, created_at)"""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT qq, group_id, created_at FROM bindings WHERE mcname = ?",
+                "SELECT mcname, group_id, created_at FROM bindings WHERE qq = ?",
+                (qq,),
+            ) as cur:
+                row = await cur.fetchone()
+        return tuple(row) if row else None
+
+    async def get_by_mcname(self, mcname: str) -> tuple[str, str, int, str] | None:
+        """返回 (qq, group_id, created_at, 库中保存的 mcname)，MC 名不区分大小写"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT qq, group_id, created_at, mcname FROM bindings WHERE mcname = ?",
                 (mcname,),
             ) as cur:
                 row = await cur.fetchone()
@@ -145,7 +156,7 @@ class BindingStore:  # QQ 与 MC 账号绑定记录 (SQLite)
 
 
 @register(
-    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.2.1"
+    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.2.2"
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -379,24 +390,53 @@ class MyPlugin(Star):
         async for msg in self.execute_and_reply(event, command, "插件列表"):
             yield msg
 
-    @filter.command("mcwho", desc="MC 玩家名反查绑定的QQ")
-    async def mcwho(self, event: AstrMessageEvent, mcname: str = ""):
+    @filter.command("mcwho", desc="查询绑定：MC名查QQ / QQ号或@某人查MC名")
+    async def mcwho(self, event: AstrMessageEvent, target: str = ""):
         if not self.is_admin(str(event.get_sender_id())):
             yield event.plain_result("抱歉，你没有权限执行此操作。")
             return
-        if not mcname:
-            yield event.plain_result("请输入要查询的MC用户名。")
+
+        at_qq = self._get_at_qq(event)
+        if not at_qq and not target:
+            yield event.plain_result("用法：/mcwho <MC名 | QQ号 | @某人>")
             return
-        row = await self.store.get_by_mcname(mcname)
-        if not row:
-            yield event.plain_result(f"MC账号 {mcname} 没有绑定任何QQ。")
-            return
-        qq, group_id, created_at = row
+
+        lines = []
+        if at_qq:
+            # @某人：只按 QQ 查
+            row = await self.store.get_detail_by_qq(at_qq)
+            if row:
+                lines.append(self._format_binding(row[0], at_qq, row[1], row[2]))
+            else:
+                lines.append(f"QQ {at_qq} 没有绑定MC账号。")
+        else:
+            # 纯数字既可能是 QQ 号也可能是 MC 名，两种都查
+            if target.isdigit():
+                row = await self.store.get_detail_by_qq(target)
+                if row:
+                    lines.append(self._format_binding(row[0], target, row[1], row[2]))
+            row = await self.store.get_by_mcname(target)
+            if row:
+                lines.append(self._format_binding(row[3], row[0], row[1], row[2]))
+            if not lines:
+                lines.append(f"{target} 没有查到绑定记录。")
+
+        yield event.plain_result("\n\n".join(lines))
+
+    @staticmethod
+    def _get_at_qq(event: AstrMessageEvent) -> str | None:
+        """取消息里第一个 @ 的用户（排除机器人自己和 @全体成员）"""
+        self_id = str(event.get_self_id())
+        for comp in event.message_obj.message:
+            if isinstance(comp, Comp.At) and str(comp.qq) not in (self_id, "all"):
+                return str(comp.qq)
+        return None
+
+    @staticmethod
+    def _format_binding(mcname: str, qq: str, group_id: str, created_at: int) -> str:
         bound_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(created_at))
         group_info = f"，申请群 {group_id}" if group_id else ""
-        yield event.plain_result(
-            f"MC账号 {mcname} 绑定的QQ：{qq}\n绑定时间：{bound_time}{group_info}"
-        )
+        return f"MC账号：{mcname}\n绑定QQ：{qq}\n绑定时间：{bound_time}{group_info}"
 
     @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
