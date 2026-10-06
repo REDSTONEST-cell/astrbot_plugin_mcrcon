@@ -4,7 +4,7 @@
 
 ### 一个基于RCON协议的MC服务器管理器插件
 
-/mcwl 相当于在游戏中执行whitelist {option} {mcname(可选)}
+/mcwl 相当于在游戏中执行whitelist {option} {mcname(可选)}，执行 remove 成功时会同时删除该 MC 账号的 QQ 绑定记录
 
 /mcban 相当于在游戏中执行ban {mcname}
 

@@ -130,9 +130,22 @@ class BindingStore:  # QQ 与 MC 账号绑定记录 (SQLite)
             await db.commit()
         return row[0]
 
+    async def remove_by_mcname(self, mcname: str) -> str | None:
+        """按 MC 名删除绑定（不区分大小写），返回被解绑的 QQ"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT qq FROM bindings WHERE mcname = ?", (mcname,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            await db.execute("DELETE FROM bindings WHERE mcname = ?", (mcname,))
+            await db.commit()
+        return row[0]
+
 
 @register(
-    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.2.0"
+    "astrbot_plugin_mcman", "卡带酱", "一个基于RCON协议的MC服务器管理器插件", "1.2.1"
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -173,8 +186,13 @@ class MyPlugin(Star):
     def is_admin(self, qqid: str) -> bool:
         return qqid in self.admin_qqs
 
-    async def execute_and_reply(self, event: AstrMessageEvent, command: str, desc: str):
-        """通用执行 + 回复逻辑"""
+    async def execute_and_reply(
+        self, event: AstrMessageEvent, command: str, desc: str, on_success=None
+    ):
+        """通用执行 + 回复逻辑
+
+        on_success: 可选的异步回调，RCON 执行成功后调用，返回的文本会追加到回复末尾
+        """
         user_name = event.get_sender_name()
         sender_qq = str(event.get_sender_id())
         named = f"{user_name}({sender_qq})"
@@ -185,8 +203,9 @@ class MyPlugin(Star):
             )
             cresp = strip_mc_color(resp)
             logger.info(f"RCON 执行结果: {resp}")
+            extra = await on_success() if on_success else ""
             yield event.plain_result(
-                f"你好, {named}, 已尝试执行 `{command}` ({desc})\n\n服务器返回：\n{cresp}"
+                f"你好, {named}, 已尝试执行 `{command}` ({desc})\n\n服务器返回：\n{cresp}{extra}"
             )
         except Exception as e:
             logger.error(f"RCON 执行失败: {e}")
@@ -198,7 +217,20 @@ class MyPlugin(Star):
             yield event.plain_result("抱歉，你没有权限执行此操作。")
             return
         command = f"{self.whitelist_command} {o} {mcname}".strip()
-        async for msg in self.execute_and_reply(event, command, "白名单管理"):
+
+        on_success = None
+        if o.lower() == "remove" and mcname:
+            # 移出白名单时一并删除绑定记录
+            async def on_success():
+                qq = await self.store.remove_by_mcname(mcname)
+                if not qq:
+                    return ""
+                logger.info(f"白名单移除 {mcname}，已删除其与 QQ {qq} 的绑定")
+                return f"\n\n已同时删除绑定记录（QQ {qq}）"
+
+        async for msg in self.execute_and_reply(
+            event, command, "白名单管理", on_success
+        ):
             yield msg
 
     @filter.command("mcban", desc="MC 黑名单添加")
